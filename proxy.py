@@ -65,7 +65,8 @@ logger = logging.getLogger("gemini-proxy")
 app = FastAPI(title="gemini-openai-proxy")
 
 _thought_sig_cache: dict[str, tuple[str, float]] = {}
-_THOUGHT_SIG_TTL = 600
+_THOUGHT_SIG_TTL = 3600
+_THOUGHT_SIG_MAX_ENTRIES = 2000
 
 
 def _cache_thought_sig(call_id: str, sig: str):
@@ -74,14 +75,19 @@ def _cache_thought_sig(call_id: str, sig: str):
     expired = [k for k, (_, ts) in _thought_sig_cache.items() if now - ts > _THOUGHT_SIG_TTL]
     for k in expired:
         del _thought_sig_cache[k]
+    overflow = len(_thought_sig_cache) - _THOUGHT_SIG_MAX_ENTRIES
+    if overflow > 0:
+        for k, _ in sorted(_thought_sig_cache.items(), key=lambda kv: kv[1][1])[:overflow]:
+            del _thought_sig_cache[k]
 
 
-def _pop_thought_sig(call_id: str) -> str | None:
-    entry = _thought_sig_cache.pop(call_id, None)
+def _get_thought_sig(call_id: str) -> str | None:
+    entry = _thought_sig_cache.get(call_id)
     if entry is None:
         return None
     sig, ts = entry
     if time.time() - ts > _THOUGHT_SIG_TTL:
+        del _thought_sig_cache[call_id]
         return None
     return sig
 
@@ -189,7 +195,7 @@ def openai_to_gemini(messages: list) -> dict:
                 except (json.JSONDecodeError, TypeError):
                     fn_args = {}
                 tc_id = tc.get("id", "")
-                sig = _pop_thought_sig(tc_id)
+                sig = _get_thought_sig(tc_id)
                 if sig:
                     fc_part: dict = {
                         "functionCall": {"name": fn.get("name", ""), "args": fn_args}
